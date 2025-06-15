@@ -1,0 +1,65 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dagster
+  namespace: argocd
+  # Add labels for better organization
+  labels:
+    app.kubernetes.io/name: dagster
+    app.kubernetes.io/part-of: data-platform
+spec:
+  project: default
+  source:
+    chart: dagster
+    repoURL: https://dagster-io.github.io/helm
+    targetRevision: "*"
+    helm:
+      releaseName: dagster
+      values: |
+        # PostgreSQL configuration
+        postgresql:
+          enabled: true
+          postgresqlUsername: dagster
+          postgresqlPassword: dagster
+          postgresqlDatabase: dagster
+          service:
+            port: 5432
+        
+        # Dagster webserver configuration
+        dagsterWebserver:
+          replicaCount: 1
+          service:
+            type: ClusterIP
+            port: 80
+        
+        # User deployments configuration
+        dagster-user-deployments:
+          enabled: true
+          deployments:
+            - name: "user-code"
+              image:
+                repository: "vnthanhtt/my-dagster-project"
+                tag: "1"
+                pullPolicy: Always
+              dagsterApiGrpcArgs:
+                - "--python-file"
+                - "/iris_analysis/definitions.py"
+              port: 3030
+        
+        # Resources for various components
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dagster
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
