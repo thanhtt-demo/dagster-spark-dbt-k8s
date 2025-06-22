@@ -101,3 +101,11 @@ Enabling 'default-storageclass' returned an error: running callbacks: [Error mak
 ```powershell
 minikube delete --all --purge
 ```
+
+## dagster build
+
+```bash
+cd dagster
+docker build . -t vnthanhtt/my-dagster-project:1
+docker push vnthanhtt/my-dagster-project:1
+```
