@@ -1,0 +1,20 @@
+apiVersion: v1   
+kind: Pod
+metadata:
+  creationTimestamp: null
+  labels:
+    run: spark-app-2
+  name: spark-app-2
+  namespace: spark-demo
+spec:
+  containers:
+  - image: public.ecr.aws/emr-on-eks/spark/emr-7.8.0
+    name: spark-app-2
+    command: ["/bin/bash"]
+    resources: {}
+    stdin: true   # ①
+    tty: true     # ②
+  dnsPolicy: ClusterFirst
+  restartPolicy: Never
+  serviceAccountName: spark-driver
+status: {}
