@@ -18,6 +18,7 @@ import pandas as pd
 
 t24_partitions = DynamicPartitionsDefinition(name="t24")
 way4_partitions = DynamicPartitionsDefinition(name="way4")
+t24month_partitions = DynamicPartitionsDefinition(name="t24month")
 
 
 @asset(partitions_def=t24_partitions)
@@ -36,6 +37,33 @@ def iris_dataset_size(context: AssetExecutionContext) -> None:
     context.log.info(f"Loaded {df.shape[0]} data points.")
 
 
+@asset(partitions_def=t24month_partitions)
+def iris_monthly_stats(context: AssetExecutionContext) -> None:
+    df = pd.read_csv(
+        "https://docs.dagster.io/assets/iris.csv",
+        names=[
+            "sepal_length_cm",
+            "sepal_width_cm",
+            "petal_length_cm",
+            "petal_width_cm",
+            "species",
+        ],
+    )
+
+    partition_key = context.partition_key
+    context.log.info(f"Processing monthly statistics for partition: {partition_key}")
+
+    # Calculate monthly statistics (this is just a sample)
+    stats = {
+        "mean_sepal_length": df["sepal_length_cm"].mean(),
+        "mean_sepal_width": df["sepal_width_cm"].mean(),
+        "count": len(df),
+        "month": partition_key,
+    }
+
+    context.log.info(f"Monthly statistics: {stats}")
+
+
 @sensor(minimum_interval_seconds=30)
 def update_dynamic_partition_sensor(context: SensorEvaluationContext):
     """Sensor to add last working days as dynamic partitions for T24 and Way4 systems"""
@@ -50,18 +78,28 @@ def update_dynamic_partition_sensor(context: SensorEvaluationContext):
         # Get existing partitions for both systems
         t24_existing_partitions = context.instance.get_dynamic_partitions("t24")
         way4_existing_partitions = context.instance.get_dynamic_partitions("way4")
+        t24month_existing_partitions = context.instance.get_dynamic_partitions("t24month")
 
         # Track new partitions to add
         t24_partitions_to_add = []
         way4_partitions_to_add = []
+        t24month_partitions_to_add = []
 
         # Check calendar records and prepare partitions to add
         for system_name, lwd in calendar_records:
             lwd_str = lwd.strftime("%Y-%m-%d")
 
-            if system_name == "t24" and lwd_str not in t24_existing_partitions:
-                t24_partitions_to_add.append(lwd_str)
-                context.log.info(f"Found new t24 partition to add: {lwd_str}")
+            if system_name == "t24":
+                # Handle t24 day partitions
+                if lwd_str not in t24_existing_partitions:
+                    t24_partitions_to_add.append(lwd_str)
+                    context.log.info(f"Found new t24 partition to add: {lwd_str}")
+
+                # Handle t24month partitions (yyyy-mm format)
+                lwd_month_str = lwd.strftime("%Y-%m")
+                if lwd_month_str not in t24month_existing_partitions:
+                    t24month_partitions_to_add.append(lwd_month_str)
+                    context.log.info(f"Found new t24month partition to add: {lwd_month_str}")
 
             elif system_name == "way4" and lwd_str not in way4_existing_partitions:
                 way4_partitions_to_add.append(lwd_str)
@@ -81,6 +119,13 @@ def update_dynamic_partition_sensor(context: SensorEvaluationContext):
             dynamic_partitions_requests.append(
                 AddDynamicPartitionsRequest(
                     partitions_def_name="way4", partition_keys=way4_partitions_to_add
+                )
+            )
+
+        if t24month_partitions_to_add:
+            dynamic_partitions_requests.append(
+                AddDynamicPartitionsRequest(
+                    partitions_def_name="t24month", partition_keys=t24month_partitions_to_add
                 )
             )
 
@@ -209,10 +254,11 @@ def update_working_day_calendar_job():
 defs = Definitions(
     assets=[
         iris_dataset_size,
+        iris_monthly_stats,
         create_working_day_calendar_table,
         update_working_day_calendar,
     ],
     sensors=[update_dynamic_partition_sensor],
     jobs=[update_working_day_calendar_job],
-    schedules=[working_day_schedule]
+    schedules=[working_day_schedule],
 )
