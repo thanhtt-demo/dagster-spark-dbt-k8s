@@ -4,12 +4,19 @@ from dagster import (
     op,
     AssetsDefinition,
     AssetExecutionContext,
+    AssetCheckExecutionContext,
     Config,
     DynamicPartitionsDefinition,
     ScheduleDefinition,
     Definitions,
     sensor,
     SensorEvaluationContext,
+    asset_check,
+    AssetCheckResult,
+    In,
+    Out,
+    JobDefinition,
+    DailyPartitionsDefinition
 )
 from dagster import SensorResult, AddDynamicPartitionsRequest
 from datetime import datetime, timedelta
@@ -19,7 +26,7 @@ import pandas as pd
 t24_partitions = DynamicPartitionsDefinition(name="t24")
 way4_partitions = DynamicPartitionsDefinition(name="way4")
 t24month_partitions = DynamicPartitionsDefinition(name="t24month")
-
+daily_partitions_def = DailyPartitionsDefinition(start_date="2025-01-01")
 
 @asset(partitions_def=t24_partitions)
 def iris_dataset_size(context: AssetExecutionContext) -> None:
@@ -34,7 +41,79 @@ def iris_dataset_size(context: AssetExecutionContext) -> None:
         ],
     )
 
-    context.log.info(f"Loaded {df.shape[0]} data points.")
+    row_count = df.shape[0]
+    context.log.info(f"Loaded {row_count} data points.")
+
+    # Add metadata that will be used by the asset check
+    context.add_output_metadata(
+        {
+            "row_count": row_count,
+            "columns": len(df.columns),
+            "species_count": df["species"].nunique(),
+        }
+    )
+
+
+@asset_check(asset=iris_dataset_size, name="test_asset_check")
+def test_asset_check(context: AssetCheckExecutionContext):
+    """Checks if the iris dataset has the expected number of rows and validates partition data."""
+    try:
+        # Try to get partition information
+        try:
+            partition = get_partition_key(context)
+            context.log.info(f"Running check for partition: {partition}")
+        except Exception as e:
+            context.log.info(f"No partition information available: {str(e)}")
+            partition = None
+
+        # Get the metadata from the iris_dataset_size asset's latest materialization
+        latest_materialization = context.instance.get_latest_materialization_events(
+            [context.asset_key]
+        )[context.asset_key]
+
+        context.log.info(f"Latest materialization: {latest_materialization}")
+
+        if not latest_materialization:
+            return AssetCheckResult(
+                passed=False,
+                description="No materialization found for the asset.",
+            )
+
+        # Extract metadata from the materialization event
+        iris_metadata = {}
+        for entry in latest_materialization.asset_materialization.metadata_entries:
+            iris_metadata[entry.label] = entry.entry_data.value
+
+        # Get specific values with defaults if not found
+        row_count = iris_metadata.get("row_count", 0)
+        columns = iris_metadata.get("columns", 0)
+        species_count = iris_metadata.get("species_count", 0)
+
+        # Define validation criteria
+        expected_row_count = 150  # Expected row count for the Iris dataset
+        passed = row_count == expected_row_count and species_count == 3
+
+        metadata = {
+            "row_count": row_count,
+            "columns": columns,
+            "species_count": species_count,
+            "expected_row_count": expected_row_count,
+        }
+
+        if partition:
+            metadata["partition"] = partition
+
+        return AssetCheckResult(
+            passed=passed,
+            metadata=metadata,
+            description=f"The dataset has {row_count} rows ({expected_row_count} expected) and {species_count} species.",
+        )
+    except Exception as e:
+        context.log.error(f"Error in asset check: {str(e)}")
+        return AssetCheckResult(
+            passed=False,
+            description=f"Error during check: {str(e)}",
+        )
 
 
 @asset(partitions_def=t24month_partitions)
@@ -78,7 +157,9 @@ def update_dynamic_partition_sensor(context: SensorEvaluationContext):
         # Get existing partitions for both systems
         t24_existing_partitions = context.instance.get_dynamic_partitions("t24")
         way4_existing_partitions = context.instance.get_dynamic_partitions("way4")
-        t24month_existing_partitions = context.instance.get_dynamic_partitions("t24month")
+        t24month_existing_partitions = context.instance.get_dynamic_partitions(
+            "t24month"
+        )
 
         # Track new partitions to add
         t24_partitions_to_add = []
@@ -99,7 +180,9 @@ def update_dynamic_partition_sensor(context: SensorEvaluationContext):
                 lwd_month_str = lwd.strftime("%Y-%m")
                 if lwd_month_str not in t24month_existing_partitions:
                     t24month_partitions_to_add.append(lwd_month_str)
-                    context.log.info(f"Found new t24month partition to add: {lwd_month_str}")
+                    context.log.info(
+                        f"Found new t24month partition to add: {lwd_month_str}"
+                    )
 
             elif system_name == "way4" and lwd_str not in way4_existing_partitions:
                 way4_partitions_to_add.append(lwd_str)
@@ -125,7 +208,8 @@ def update_dynamic_partition_sensor(context: SensorEvaluationContext):
         if t24month_partitions_to_add:
             dynamic_partitions_requests.append(
                 AddDynamicPartitionsRequest(
-                    partitions_def_name="t24month", partition_keys=t24month_partitions_to_add
+                    partitions_def_name="t24month",
+                    partition_keys=t24month_partitions_to_add,
                 )
             )
 
@@ -218,23 +302,103 @@ def working_day_calendar_table(context: AssetExecutionContext):
         conn.close()
 
 
+# Utility function to get partition key from asset check context
+def get_partition_key(context: AssetCheckExecutionContext) -> str:
+    """Extract partition key from asset check context"""
+    step_context = context.get_step_execution_context()
+    partition = step_context.partition_key
+    return partition
+
+
 # Schedule definition for daily update
 working_day_schedule = ScheduleDefinition(
     name="working_day_calendar_update",  # Add a name for the schedule
     cron_schedule="55 9 * * *",  # Run at 9:55 AM every day
     execution_timezone="Asia/Bangkok",
     description="Daily schedule to update the working day calendar",
-    target=[working_day_calendar_table]
+    target=[working_day_calendar_table],
 )
+
+
+# Op to manually add yesterday's date as a partition
+@op
+def add_yesterday_partitions(context):
+    """Add yesterday's date as a dynamic partition for t24 and way4"""
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday_month = (datetime.now() - timedelta(days=1)).strftime("%Y-%m")
+
+    context.log.info(f"Adding partition for date: {yesterday}")
+
+    # Get existing partitions
+    t24_existing = context.instance.get_dynamic_partitions("t24")
+    way4_existing = context.instance.get_dynamic_partitions("way4")
+    t24month_existing = context.instance.get_dynamic_partitions("t24month")
+
+    # Track partitions to add
+    t24_to_add = []
+    way4_to_add = []
+    t24month_to_add = []
+
+    # Add t24 partition if not exists
+    if yesterday not in t24_existing:
+        t24_to_add.append(yesterday)
+        context.log.info(f"Will add t24 partition: {yesterday}")
+    else:
+        context.log.info(f"t24 partition already exists: {yesterday}")
+
+    # Add way4 partition if not exists
+    if yesterday not in way4_existing:
+        way4_to_add.append(yesterday)
+        context.log.info(f"Will add way4 partition: {yesterday}")
+    else:
+        context.log.info(f"way4 partition already exists: {yesterday}")
+
+    # Add t24month partition if not exists
+    if yesterday_month not in t24month_existing:
+        t24month_to_add.append(yesterday_month)
+        context.log.info(f"Will add t24month partition: {yesterday_month}")
+    else:
+        context.log.info(f"t24month partition already exists: {yesterday_month}")
+
+    # Create the partition requests
+    partition_requests = []
+
+    if t24_to_add:
+        partition_requests.append(
+            AddDynamicPartitionsRequest(
+                partitions_def_name="t24", partition_keys=t24_to_add
+            )
+        )
+
+    if way4_to_add:
+        partition_requests.append(
+            AddDynamicPartitionsRequest(
+                partitions_def_name="way4", partition_keys=way4_to_add
+            )
+        )
+
+    if t24month_to_add:
+        partition_requests.append(
+            AddDynamicPartitionsRequest(
+                partitions_def_name="t24month", partition_keys=t24month_to_add
+            )
+        )
+
+    return partition_requests
+
+
+# Job definition for manually adding partitions
+@job
+def update_dynamic_partition_job_manualy():
+    """Job to manually add yesterday as a partition for t24 and way4"""
+    add_yesterday_partitions()
 
 
 # Update Definitions to include new assets, jobs and schedules
 defs = Definitions(
-    assets=[
-        iris_dataset_size,
-        iris_monthly_stats,
-        working_day_calendar_table
-    ],
+    assets=[iris_dataset_size, iris_monthly_stats, working_day_calendar_table],
+    asset_checks=[test_asset_check],
     sensors=[update_dynamic_partition_sensor],
     schedules=[working_day_schedule],
+    jobs=[update_dynamic_partition_job_manualy],
 )
