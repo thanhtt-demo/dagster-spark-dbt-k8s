@@ -1,11 +1,11 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: dagster
+  name: dagster-python
   namespace: argocd
   # Add labels for better organization
   labels:
-    app.kubernetes.io/name: dagster
+    app.kubernetes.io/name: dagster-python
     app.kubernetes.io/part-of: data-platform
 spec:
   project: default
@@ -56,7 +56,7 @@ spec:
             memory: 256Mi
   destination:
     server: https://kubernetes.default.svc
-    namespace: dagster
+    namespace: dagster-python
   syncPolicy:
     automated:
       prune: false

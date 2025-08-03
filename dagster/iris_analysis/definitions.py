@@ -161,7 +161,7 @@ def get_postgres_connection():
 
 # Asset to create the table if not exists
 @asset
-def create_working_day_calendar_table(context: AssetExecutionContext):
+def working_day_calendar_table(context: AssetExecutionContext):
     """Create the working_day_calendar table if it doesn't exist"""
     conn = get_postgres_connection()
     cursor = conn.cursor()
@@ -182,24 +182,7 @@ def create_working_day_calendar_table(context: AssetExecutionContext):
         )
         conn.commit()
         context.log.info("Table working_day_calendar created or already exists")
-    except Exception as e:
-        conn.rollback()
-        context.log.error(f"Error creating table: {str(e)}")
-        raise
-    finally:
-        cursor.close()
-        conn.close()
 
-
-# Asset to update working day calendar daily
-@asset(description="Updates working_day_calendar table with today's data")
-def update_working_day_calendar(context: AssetExecutionContext):
-    """Insert today's data into working_day_calendar table"""
-    conn = get_postgres_connection()
-    cursor = conn.cursor()
-
-    try:
-        # Systems to update
         systems = ["t24", "way4"]  # Add more systems as needed
         today = datetime.now().strftime("%Y-%m-%d")
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -228,7 +211,7 @@ def update_working_day_calendar(context: AssetExecutionContext):
         conn.commit()
     except Exception as e:
         conn.rollback()
-        context.log.error(f"Error updating working day calendar: {str(e)}")
+        context.log.error(f"Error creating table: {str(e)}")
         raise
     finally:
         cursor.close()
@@ -237,17 +220,12 @@ def update_working_day_calendar(context: AssetExecutionContext):
 
 # Schedule definition for daily update
 working_day_schedule = ScheduleDefinition(
-    job_name="update_working_day_calendar_job",
-    cron_schedule="0 0 * * *",  # Run at midnight every day
-    execution_timezone="UTC",
+    name="working_day_calendar_update",  # Add a name for the schedule
+    cron_schedule="55 9 * * *",  # Run at 9:55 AM every day
+    execution_timezone="Asia/Bangkok",
+    description="Daily schedule to update the working day calendar",
+    target=[working_day_calendar_table]
 )
-
-
-# Define job for the working day calendar update
-@job
-def update_working_day_calendar_job():
-    create_working_day_calendar_table()
-    update_working_day_calendar()
 
 
 # Update Definitions to include new assets, jobs and schedules
@@ -255,10 +233,8 @@ defs = Definitions(
     assets=[
         iris_dataset_size,
         iris_monthly_stats,
-        create_working_day_calendar_table,
-        update_working_day_calendar,
+        working_day_calendar_table
     ],
     sensors=[update_dynamic_partition_sensor],
-    jobs=[update_working_day_calendar_job],
     schedules=[working_day_schedule],
 )
